@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-__author__ = '7sDream'
-
 from .common import *
+from .base import BaseZhihu
 
 
-class Collection:
+class Collection(BaseZhihu):
 
     """收藏夹，请使用``ZhihuClient.collection``方法构造对象."""
 
@@ -29,10 +28,16 @@ class Collection:
         self._name = name
         self._owner = owner
         self._follower_num = follower_num
+        self._id = int(re.match(r'.*/(\d+)', self.url).group(1))
 
-    def _make_soup(self):
-        if self.soup is None:
-            self.soup = BeautifulSoup(self._session.get(self.url).text)
+    @property
+    def id(self):
+        """获取收藏夹id（网址最后的部分）.
+
+        :return: 收藏夹id
+        :rtype: int
+        """
+        return self._id
 
     @property
     @check_soup('_cid')
@@ -152,6 +157,60 @@ class Collection:
                 yield answer
             i += 1
 
+    @property
+    def logs(self):
+        """获取收藏夹日志
+
+        :return: 收藏夹日志中的操作，返回生成器
+        :rtype: CollectActivity.Iterable
+        """
+        import time
+        from datetime import datetime
+        from .answer import Answer
+        from .question import Question
+        from .acttype import CollectActType
+
+        self._make_soup()
+        gotten_feed_num = 20
+        offset = 0
+        data = {
+            'start': 0,
+            '_xsrf': self.xsrf
+        }
+        api_url = self.url + 'log'
+        while gotten_feed_num == 20:
+            data['offset'] = offset
+            res = self._session.post(url=api_url, data=data)
+            gotten_feed_num = res.json()['msg'][0]
+            soup = BeautifulSoup(res.json()['msg'][1])
+            offset += gotten_feed_num
+            zm_items = soup.find_all('div', class_='zm-item')
+
+            for zm_item in zm_items:
+                act_time = datetime.strptime(zm_item.find('time').text, "%Y-%m-%d %H:%M:%S")
+                if zm_item.find('ins'):
+                    link = zm_item.find('ins').a
+                    act_type = CollectActType.INSERT_ANSWER
+                elif zm_item.find('del'):
+                    link = zm_item.find('del').a
+                    act_type = CollectActType.DELETE_ANSWER
+                else:
+                    continue
+                try:
+                    answer_url = Zhihu_URL + link['href']
+                    question_url = re_a2q.match(answer_url).group(1)
+                    question = Question(question_url, link.text)
+                    answer = Answer(
+                        answer_url, question, session=self._session)
+                    yield CollectActivity(
+                        act_type, act_time, self.owner, self, answer)
+                except AttributeError:
+                    act_type = CollectActType.CREATE_COLLECTION
+                    yield CollectActivity(
+                        act_type, act_time, self.owner, self)
+            data['start'] = zm_items[-1]['id'][8:]
+            time.sleep(0.5)
+
     def _page_get_questions(self, soup):
         from .question import Question
 
@@ -169,7 +228,7 @@ class Collection:
 
     def _page_get_answers(self, soup):
         from .question import Question
-        from .author import Author
+        from .author import Author, ANONYMOUS
         from .answer import Answer
 
         answer_tags = soup.find_all("div", class_="zm-item")
@@ -185,26 +244,88 @@ class Collection:
                     reason = tag.find('div', id='answer-status').p.text
                     print("pass a answer, reason %s ." % reason)
                     continue
-                author_name = '匿名用户'
-                author_motto = ''
-                author_url = None
                 if tag.h2 is not None:
                     question_title = tag.h2.a.text
                     question_url = Zhihu_URL + tag.h2.a['href']
                     question = Question(question_url, question_title,
                                         session=self._session)
                 answer_url = Zhihu_URL + url_tag['href']
-                h3 = tag.find('h3')
-                if h3.text != '匿名用户':
-                    author_url = Zhihu_URL + h3.a['href']
-                    author_name = h3.a.text
-                    if h3.strong is not None:
-                        author_motto = tag.find('h3').strong['title']
-                print(author_url)
-                author = Author(author_url, author_name, author_motto,
-                                session=self._session)
-                upvote = int(tag.find(
-                    'a', class_='zm-item-vote-count')['data-votecount'])
+                div = tag.find('div', class_='zm-item-answer-author-info')
+                author_link = div.find('a', class_='author-link')
+                if author_link is not None:
+                    author_url = Zhihu_URL + author_link['href']
+                    author_name = author_link.text
+                    motto_span = div.find('span', class_='bio')
+                    author_motto = motto_span['title'] if motto_span else ''
+                    author = Author(author_url, author_name, author_motto,
+                                    session=self._session)
+                else:
+                    author = ANONYMOUS
+                upvote_num = tag.find('a', class_='zm-item-vote-count').text
+                if upvote_num.isdigit():
+                    upvote_num = int(upvote_num)
+                else:
+                    upvote_num = None
                 answer = Answer(answer_url, question, author,
-                                upvote, session=self._session)
+                                upvote_num, session=self._session)
                 yield answer
+
+
+class CollectActivity:
+    """收藏夹操作, 请使用``Collection.logs``构造对象."""
+
+    def __init__(self, type, time, owner, collection, answer=None):
+        """创建收藏夹操作类实例
+
+        :param acttype.CollectActType type: 操作类型
+        :param datetime.datetime time: 进行操作的时间
+        :param Author owner: 收藏夹的拥有者
+        :param Collection collection: 所属收藏夹
+        :param Answer answer: 收藏的答案，可选
+        :return: CollectActivity
+        """
+        self._type = type
+        self._time = time
+        self._owner = owner
+        self._collection = collection
+        self._answer = answer
+
+    @property
+    def type(self):
+        """
+        :return: 收藏夹操作类型, 具体参见 :class:`.CollectActType`
+        :rtype: :class:`.CollectActType`
+        """
+        return self._type
+
+    @property
+    def answer(self):
+        """
+        :return: 添加或删除收藏的答案, 若是创建收藏夹操作返回 None
+        :rtype: Answer or None
+        """
+        return self._answer
+
+    @property
+    def time(self):
+        """
+        :return: 进行操作的时间
+        :rtype: datetime.datetime
+        """
+        return self._time
+
+    @property
+    def owner(self):
+        """
+        :return: 收藏夹的拥有者
+        :rtype: Author
+        """
+        return self._owner
+
+    @property
+    def collection(self):
+        """
+        :return: 所属收藏夹
+        :rtype: Collection
+        """
+        return self._collection

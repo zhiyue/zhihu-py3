@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-__author__ = '7sDream'
+import time
+from datetime import datetime
 
 from .common import *
-import time
+from .base import BaseZhihu
 
 
-class Topic:
+class Topic(BaseZhihu):
 
     """答案类，请使用``ZhihuClient.topic``方法构造对象."""
 
@@ -23,10 +24,6 @@ class Topic:
         self._session = session
         self._name = name
         self._id = int(re_topic_url.match(self.url).group(1))
-
-    def _make_soup(self):
-        if self.soup is None:
-            self.soup = BeautifulSoup(self._session.get(self.url).content)
 
     @property
     def id(self):
@@ -80,7 +77,7 @@ class Topic:
         self._make_soup()
         parent_topic_tag = self.soup.find('div', class_='parent-topic')
         if parent_topic_tag is None:
-            return []
+            yield []
         else:
             for topic_tag in parent_topic_tag.find_all('a'):
                 yield Topic(Zhihu_URL + topic_tag['href'],
@@ -147,7 +144,7 @@ class Topic:
         :return: 话题关注者，返回生成器
         :rtype: Author.Iterable
         """
-        from .author import Author
+        from .author import Author, ANONYMOUS
         self._make_soup()
         gotten_data_num = 20
         data = {
@@ -167,8 +164,11 @@ class Topic:
                 h2 = div.h2
                 url = Zhihu_URL + h2.a['href']
                 name = h2.a.text
-                motto = h2.next_element.text
-                yield Author(url, name, motto, session=self._session)
+                motto = h2.parent.div.text.strip()
+                try:
+                    yield Author(url, name, motto, session=self._session)
+                except ValueError:  # invalid url
+                    yield ANONYMOUS
             data['start'] = int(re_get_number.match(divs[-1]['id']).group(1))
 
     @property
@@ -200,7 +200,7 @@ class Topic:
         :return: 此话题下最佳回答者，一般来说是5个，要不就没有，返回生成器
         :rtype: Author.Iterable
         """
-        from .author import Author
+        from .author import Author, ANONYMOUS
         self._make_soup()
         t = self.soup.find('div', id='zh-topic-top-answerer')
         if t is None:
@@ -208,8 +208,11 @@ class Topic:
         for d in t.find_all('div', class_='zm-topic-side-person-item-content'):
             url = Zhihu_URL + d.a['href']
             name = d.a.text
-            motto = d.div['title']
-            yield Author(url, name, motto, session=self._session)
+            motto = d.find('span', class_='bio')['title']
+            try:
+                yield Author(url, name, motto, session=self._session)
+            except ValueError:  # invalid url
+                yield ANONYMOUS
 
     @property
     def top_answers(self):
@@ -220,7 +223,8 @@ class Topic:
         """
         from .question import Question
         from .answer import Answer
-        from .author import Author
+        from .author import Author, ANONYMOUS
+
         top_answers_url = Topic_Top_Answers_Url.format(self.id)
         params = {'page': 1}
         while True:
@@ -234,28 +238,28 @@ class Topic:
             if soup.find('div', class_='error') is not None:
                 return
             questions = soup.find_all('a', class_='question_link')
-            answers = soup.find_all(
-                'a', class_=re.compile(r'answer-date-link.*'))
-            authors = soup.find_all('h3', class_='zm-item-answer-author-wrap')
+            answers = soup.find_all('a', class_='answer-date-link')
+            authors = soup.find_all('div', class_='zm-item-answer-author-info')
             upvotes = soup.find_all('a', class_='zm-item-vote-count')
             for ans, up, q, au in zip(answers, upvotes, questions, authors):
                 answer_url = Zhihu_URL + ans['href']
                 question_url = Zhihu_URL + q['href']
-                question_title = q.text
-                upvote = int(up['data-votecount'])
+                question_title = q.text.strip()
+                upvote = up.text
+                if upvote.isdigit():
+                    upvote = int(upvote)
+                else:
+                    upvote = None
                 question = Question(question_url, question_title,
                                     session=self._session)
                 if au.a is None:
-                    author_url = None
-                    author_name = '匿名用户'
-                    author_motto = ''
+                    author = ANONYMOUS
                 else:
                     author_url = Zhihu_URL + au.a['href']
                     author_name = au.a.text
                     author_motto = au.strong['title'] if au.strong else ''
-
-                author = Author(author_url, author_name, author_motto,
-                                session=self._session)
+                    author = Author(author_url, author_name, author_motto,
+                                    session=self._session)
                 yield Answer(answer_url, question, author, upvote,
                              session=self._session)
 
@@ -263,11 +267,11 @@ class Topic:
     def questions(self):
         """获取话题下的所有问题（按时间降序排列）
 
-        :return: 话题下的所有问题，返回生成器
+        :return: 话题下所有问题，返回生成器
         :rtype: Question.Iterable
         """
         from .question import Question
-        question_url = Topic_Question_Url.format(self.id)
+        question_url = Topic_Questions_Url.format(self.id)
         params = {'page': 1}
         older_time_stamp = int(time.time()) * 1000
         while True:
@@ -281,9 +285,36 @@ class Topic:
                 questions))
             for qu_div in questions:
                 url = Zhihu_URL + qu_div.h2.a['href']
-                title = qu_div.h2.a.text
-                yield Question(url, title, session=self._session)
+                title = qu_div.h2.a.text.strip()
+                creation_time = datetime.fromtimestamp(
+                        int(qu_div.h2.span['data-timestamp']) // 1000)
+                yield Question(url, title, creation_time=creation_time,
+                               session=self._session)
             older_time_stamp = int(questions[-1].h2.span['data-timestamp'])
+            params['page'] += 1
+
+    @property
+    def unanswered_questions(self):
+        """获取话题下的等待回答的问题
+
+        什么是「等待回答」的问题：https://www.zhihu.com/question/40470324
+
+        :return: 话题下等待回答的问题，返回生成器
+        :rtype: Question.Iterable
+        """
+        from .question import Question
+        question_url = Topic_Unanswered_Question_Url.format(self.id)
+        params = {'page': 1}
+        while True:
+            res = self._session.get(question_url, params=params)
+            soup = BeautifulSoup(res.content)
+            if soup.find('div', class_='error') is not None:
+                return
+            questions = soup.find_all('div', class_='question-item')
+            for qu_div in questions:
+                url = Zhihu_URL + qu_div.h2.a['href']
+                title = qu_div.h2.a.text.strip()
+                yield Question(url, title, session=self._session)
             params['page'] += 1
 
     @property
@@ -295,7 +326,8 @@ class Topic:
         """
         from .question import Question
         from .answer import Answer
-        from .author import Author
+        from .author import Author, ANONYMOUS
+
         newest_url = Topic_Newest_Url.format(self.id)
         params = {'start': 0, '_xsrf': self.xsrf}
         res = self._session.get(newest_url)
@@ -309,27 +341,28 @@ class Topic:
             for div in divs:
                 q = div.find('a', class_="question_link")
                 question_url = Zhihu_URL + q['href']
-                question_title = q.text
+                question_title = q.text.strip()
                 question = Question(question_url, question_title,
                                     session=self._session)
 
                 ans = div.find('a', class_='answer-date-link')
                 answer_url = Zhihu_URL + ans['href']
 
-                up = div.find('a', class_='zm-item-vote-count')
-                upvote = int(up['data-votecount'])
+                upvote = div.find('a', class_='zm-item-vote-count').text
+                if upvote.isdigit():
+                    upvote = int(upvote)
+                else:
+                    upvote = None
 
-                au = div.find('h3', class_='zm-item-answer-author-wrap')
+                au = div.find('div', class_='zm-item-answer-author-info')
                 if au.a is None:
-                    author_url = None
-                    author_name = '匿名用户'
-                    author_motto = ''
+                    author = ANONYMOUS
                 else:
                     author_url = Zhihu_URL + au.a['href']
                     author_name = au.a.text
                     author_motto = au.strong['title'] if au.strong else ''
-                author = Author(author_url, author_name, author_motto,
-                                session=self._session)
+                    author = Author(author_url, author_name, author_motto,
+                                    session=self._session)
                 yield Answer(answer_url, question, author, upvote,
                              session=self._session)
 
@@ -365,7 +398,7 @@ class Topic:
                 'div', class_='feed-item')[-1]['data-score']
             for q in questions:
                 question_url = Zhihu_URL + q['href']
-                question_title = q.text
+                question_title = q.text.strip()
                 question = Question(question_url, question_title,
                                     session=self._session)
                 yield question
@@ -396,28 +429,30 @@ class Topic:
             last_score = answers_div[-1]['data-score']
             for div in answers_div:
                 # 没有 text area 的情况是：答案被和谐。
-                if not (div.h3 and div.textarea):
+                if not div.textarea:
                     continue
                 question_url = Zhihu_URL + div.h2.a['href']
-                question_title = div.a.text
+                question_title = div.h2.a.text.strip()
                 question = Question(question_url, question_title,
                                     session=self._session)
-                if div.h3.a is None:
+                author_link = div.find('a', class_='author-link')
+                if not author_link:
                     author_url = None
                     author_name = '匿名用户'
                     author_motto = ''
                 else:
-                    author_url = Zhihu_URL + div.h3.a['href']
-                    author_name = div.h3.a.text
-                    author_motto = div.strong['title'] if div.strong else ''
+                    author_url = Zhihu_URL + author_link['href']
+                    author_name = author_link.text
+                    author_motto_span = div.find('span', class_='bio')
+                    author_motto = author_motto_span['title'] \
+                        if author_motto_span else ''
                 author = Author(author_url, author_name, author_motto,
                                 session=self._session)
 
-                answer_url = Zhihu_URL + BeautifulSoup(
-                    ''.join(map(str, div.textarea.contents))).find(
-                    'a', class_='answer-date-link')['href']
+                body = div.find('div', class_='zm-item-rich-text')
+                answer_url = Zhihu_URL + body['data-entry-url']
                 upvote_num = int(div.find(
-                    'a', class_='zm-item-vote-count')['data-votecount'])
+                    'div', class_='zm-item-vote-info')['data-votecount'])
 
                 yield Answer(answer_url, question, author, upvote_num,
                              session=self._session)

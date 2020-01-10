@@ -1,7 +1,6 @@
-Question 问题类
+Comment 评论类
 ===============
 
-..  autoclass:: zhihu.question.Question
+..  autoclass:: zhihu.comment.Comment
     :members:
     :special-members: __init__
-

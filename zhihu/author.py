@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-__author__ = '7sDream'
-
 import json
-import datetime
 
+from .base import BaseZhihu
 from .common import *
 
 
-class Author:
+class BanException(Exception):
+    """当尝试获取被反屏蔽系统限制的用户资料时，将会引发此异常"""
+    pass
 
+
+class Author(BaseZhihu):
     """用户类，请使用``ZhihuClient.answer``方法构造对象."""
 
     @class_common_init(re_author_url, True)
@@ -45,12 +47,13 @@ class Author:
         self._thank_num = thank_num
         self._photo_url = photo_url
 
-    def _make_soup(self):
-        if self.soup is None and self.url is not None:
-            r = self._session.get(self.url)
-            self.soup = BeautifulSoup(r.content)
-            self._nav_list = self.soup.find(
-                'div', class_='profile-navbar').find_all('a')
+    def _gen_soup(self, content):
+        self.soup = BeautifulSoup(content)
+        ban_title = self.soup.find("div", class_="ProfileBan-title")
+        if ban_title is not None:
+            raise BanException(ban_title.text)
+        self._nav_list = self.soup.find(
+            'div', class_='profile-navbar').find_all('a')
 
     def _make_card(self):
         if self.card is None and self.url is not None:
@@ -66,7 +69,8 @@ class Author:
         :return: 用户id
         :rtype: str
         """
-        return re.match(r'^.*/([^/]+)/$', self.url).group(1)
+        return re.match(r'^.*/([^/]+)/$', self.url).group(1) \
+            if self.url is not None else ''
 
     @property
     @check_soup('_xsrf')
@@ -76,9 +80,7 @@ class Author:
         :return: xsrf参数
         :rtype: str
         """
-        self._make_soup()
-        return self.soup.find(
-            'input', attrs={'name': '_xsrf'})['value']
+        return self.soup.find('input', attrs={'name': '_xsrf'})['value']
 
     @property
     @check_soup('_hash_id')
@@ -144,12 +146,11 @@ class Author:
         """
         if self.url is not None:
             if self.soup is not None:
-                img = 'http:' + self.soup.find(
-                    'img', class_='avatar avatar-l')['src']
+                img = self.soup.find('img', class_='Avatar Avatar--l')['src']
                 return img.replace('_l', '_r')
             else:
-                assert(self.card is not None)
-                return 'http:' + self.card.img['src'].replace('_xs', '_r')
+                assert (self.card is not None)
+                return PROTOCOL + self.card.img['src'].replace('_xs', '_r')
         else:
             return 'http://pic1.zhimg.com/da8e974dc_r.jpg'
 
@@ -215,6 +216,75 @@ class Author:
             return number
 
     @property
+    @check_soup('_weibo_url')
+    def weibo_url(self):
+        """获取用户微博链接.
+
+        :return: 微博链接地址，如没有则返回 ‘unknown’
+        :rtype: str
+        """
+        if self.url is None:
+            return None
+        else:
+            tmp = self.soup.find(
+                'a', class_='zm-profile-header-user-weibo')
+            return tmp['href'] if tmp is not None else 'unknown'
+
+    @property
+    def business(self):
+        """用户的行业.
+
+        :return: 用户的行业，如没有则返回 ‘unknown’
+        :rtype: str
+        """
+        return self._find_user_profile('business')
+
+    @property
+    def location(self):
+        """用户的所在地.
+
+        :return: 用户的所在地，如没有则返回 ‘unknown’
+        :rtype: str
+        """
+        return self._find_user_profile('location')
+
+    @property
+    def education(self):
+        """用户的教育状况.
+
+        :return: 用户的教育状况，如没有则返回 ‘unknown’
+        :rtype: str
+        """
+        return self._find_user_profile('education')
+
+    def _find_user_profile(self, t):
+        self._make_soup()
+        if self.url is None:
+            return 'unknown'
+        else:
+            res = self.soup.find(
+                'span', class_=t)
+            if res and res.has_attr('title'):
+                return res['title']
+            else:
+                return 'unknown'
+
+    @property
+    @check_soup('_gender')
+    def gender(self):
+        """用户的性别.
+
+        :return: 用户的性别（male/female/unknown)
+        :rtype: str
+        """
+        if self.url is None:
+            return 'unknown'
+        else:
+            return 'female' \
+                if self.soup.find('i', class_='icon-profile-female') \
+                else 'male'
+
+    @property
     @check_soup('_question_num')
     def question_num(self):
         """获取提问数量.
@@ -267,6 +337,36 @@ class Author:
             return int(self._nav_list[4].span.text)
 
     @property
+    @check_soup('_followed_column_num')
+    def followed_column_num(self):
+        """获取用户关注的专栏数
+
+        :return: 关注的专栏数
+        :rtype: int
+        """
+        if self.url is not None:
+            tag = self.soup.find('div', class_='zm-profile-side-columns')
+            if tag is not None:
+                return int(re_get_number.match(
+                    tag.parent.strong.text).group(1))
+        return 0
+
+    @property
+    @check_soup('_followed_topic_num')
+    def followed_topic_num(self):
+        """获取用户关注的话题数
+
+        :return: 关注的话题数
+        :rtype: int
+        """
+        if self.url is not None:
+            tag = self.soup.find('div', class_='zm-profile-side-topics')
+            if tag is not None:
+                return int(re_get_number.match(
+                    tag.parent.strong.text).group(1))
+        return 0
+
+    @property
     def questions(self):
         """获取用户的所有问题.
 
@@ -286,7 +386,7 @@ class Author:
                 'div', class_='zm-profile-section-main')
             for link, data in zip(question_links, question_datas):
                 url = Zhihu_URL + link['href']
-                title = link.text
+                title = link.text.strip()
                 answer_num = int(
                     re_get_number.match(data.div.contents[4]).group(1))
                 follower_num = int(
@@ -317,10 +417,14 @@ class Author:
                 answer_url = Zhihu_URL + q['href']
                 question_url = Zhihu_URL + re_a2q.match(q['href']).group(1)
                 question_title = q.text
-                upvote = int(upvote['data-votecount'])
+                upvote_num = upvote.text
+                if upvote_num.isdigit():
+                    upvote_num = int(upvote_num)
+                else:
+                    upvote_num = None
                 question = Question(question_url, question_title,
                                     session=self._session)
-                yield Answer(answer_url, question, self, upvote,
+                yield Answer(answer_url, question, self, upvote_num,
                              session=self._session)
 
     @property
@@ -343,7 +447,25 @@ class Author:
         for x in self._follow_ee_ers('ee'):
             yield x
 
-    def _follow_ee_ers(self, t):
+    def followers_skip(self, skip):
+        """获取关注此用户的人，跳过前 skip 个用户。
+
+        :return: 关注此用户的人，返回生成器
+        :rtype: Author.Iterable
+        """
+        for x in self._follow_ee_ers('er', skip):
+            yield x
+
+    def followees_skip(self, skip):
+        """获取用户关注的人，跳过前 skip 个用户。
+
+        :return: 用户关注的人的，返回生成器
+        :rtype: Author.Iterable
+        """
+        for x in self._follow_ee_ers('ee', skip):
+            yield x
+
+    def _follow_ee_ers(self, t, skip=0):
         if self.url is None:
             return
         if t == 'er':
@@ -358,7 +480,7 @@ class Author:
         params = {"order_by": "created", "offset": 0, "hash_id": self.hash_id}
         data = {'_xsrf': self.xsrf, 'method': 'next', 'params': ''}
         gotten_date_num = 20
-        offset = 0
+        offset = skip
         while gotten_date_num == 20:
             params['offset'] = offset
             data['params'] = json.dumps(params)
@@ -371,12 +493,18 @@ class Author:
                 h2 = soup.find('h2')
                 author_name = h2.a.text
                 author_url = h2.a['href']
-                author_motto = soup.find('div', class_='zg-big-gray').text
+                author_motto = soup.find('span', class_='bio').text
                 author_photo = PROTOCOL + soup.a.img['src'].replace('_m', '_r')
-                numbers = [int(re_get_number.match(x.text).group(1))
-                           for x in soup.find_all('a', target='_blank')]
-                yield Author(author_url, author_name, author_motto, *numbers,
-                             photo_url=author_photo, session=self._session)
+                numbers = [
+                    int(re_get_number.match(x.text).group(1))
+                    for x in soup.find_all('a', class_="zg-link-gray-normal")
+                ]
+                try:
+                    yield Author(author_url, author_name, author_motto,
+                                 *numbers,
+                                 photo_url=author_photo, session=self._session)
+                except ValueError:  # invalid url
+                    yield ANONYMOUS
 
     @property
     def collections(self):
@@ -418,20 +546,95 @@ class Author:
         if self.url is None or self.post_num == 0:
             return
         soup = BeautifulSoup(self._session.get(self.url + 'posts').text)
-        column_tags = soup.find_all('div', class_='column')
+        column_list = soup.find('div', class_='column-list')
+        column_tags = column_list.find_all('div', class_='item')
         for column_tag in column_tags:
-            name = column_tag.div.a.span.text
-            url = column_tag.div.a['href']
-            follower_num = int(re_get_number.match(
-                column_tag.div.div.a.text).group(1))
-            footer = column_tag.find('div', class_='footer')
-            if footer is None:
+            name = column_tag['title']
+            url = column_tag['data-href']
+            numbers = column_tag.find('span', class_='des').text.split('•')
+            follower_num = int(re_get_number.match(numbers[0]).group(1))
+            if len(numbers) == 1:
                 post_num = 0
             else:
                 post_num = int(
-                    re_get_number.match(footer.a.text).group(1))
+                    re_get_number.match(numbers[1]).group(1))
             yield Column(url, name, follower_num, post_num,
                          session=self._session)
+
+    @property
+    def followed_columns(self):
+        """获取用户关注的专栏.
+
+        :return: 用户关注的专栏，返回生成器
+        :rtype: Column.Iterable
+        """
+        from .column import Column
+        if self.url is None:
+            return
+        if self.followed_column_num > 0:
+            tag = self.soup.find('div', class_='zm-profile-side-columns')
+            if tag is not None:
+                for a in tag.find_all('a'):
+                    yield Column(a['href'], a.img['alt'],
+                                 session=self._session)
+            if self.followed_column_num > 7:
+                offset = 7
+                gotten_data_num = 20
+                while gotten_data_num == 20:
+                    params = {
+                        'hash_id': self.hash_id,
+                        'limit': 20,
+                        'offset': offset
+                    }
+                    data = {
+                        'method': 'next',
+                        '_xsrf': self.xsrf,
+                        'params': json.dumps(params)
+                    }
+                    j = self._session.post(Author_Get_More_Follow_Column_URL,
+                                           data=data).json()
+                    gotten_data_num = len(j['msg'])
+                    offset += gotten_data_num
+                    for msg in map(BeautifulSoup, j['msg']):
+                        name = msg.strong.text
+                        url = msg.a['href']
+                        post_num = int(re_get_number.match(
+                            msg.span.text).group(1))
+                        yield Column(url, name, post_num=post_num,
+                                     session=self._session)
+
+    @property
+    def followed_topics(self):
+        """获取用户关注的话题.
+
+        :return: 用户关注的话题，返回生成器
+        :rtype: Topic.Iterable
+        """
+        from .topic import Topic
+        if self.url is None:
+            return
+        if self.followed_topic_num > 0:
+            tag = self.soup.find('div', class_='zm-profile-side-topics')
+            if tag is not None:
+                for a in tag.find_all('a'):
+                    yield Topic(Zhihu_URL + a['href'], a.img['alt'],
+                                session=self._session)
+            if self.followed_topic_num > 7:
+                offset = 7
+                gotten_data_num = 20
+                while gotten_data_num == 20:
+                    data = {'start': 0, 'offset': offset, '_xsrf': self.xsrf}
+                    j = self._session.post(
+                        Author_Get_More_Follow_Topic_URL.format(self.id),
+                        data=data).json()
+                    gotten_data_num = j['msg'][0]
+                    offset += gotten_data_num
+                    topic_item = BeautifulSoup(j['msg'][1]).find_all(
+                        'div', class_='zm-profile-section-item')
+                    for div in topic_item:
+                        name = div.strong.text
+                        url = Zhihu_URL + div.a['href']
+                        yield Topic(url, name, session=self._session)
 
     @property
     def activities(self):
@@ -441,137 +644,40 @@ class Author:
         :rtype: Activity.Iterable
         """
         from .activity import Activity
-        from .acttype import ActType
-        from .question import Question
-        from .answer import Answer
-        from .column import Column
-        from .post import Post
-        from .topic import Topic
 
         if self.url is None:
             return
-        self._make_soup()
+
         gotten_feed_num = 20
         start = '0'
+        api_url = self.url + 'activities'
         while gotten_feed_num == 20:
             data = {'_xsrf': self.xsrf, 'start': start}
-            res = self._session.post(self.url + 'activities', data=data)
+            res = self._session.post(api_url, data=data)
             gotten_feed_num = res.json()['msg'][0]
             soup = BeautifulSoup(res.json()['msg'][1])
             acts = soup.find_all(
                 'div', class_='zm-profile-section-item zm-item clearfix')
+
             start = acts[-1]['data-time'] if len(acts) > 0 else 0
             for act in acts:
-                act_time = datetime.datetime.fromtimestamp(
-                    int(act['data-time']))
-                useless_tag = act.div.find('a', class_='zg-link')
-                if useless_tag is not None:
-                    useless_tag.extract()
-                type_string = next(act.div.stripped_strings)
-                if type_string in ['赞同了', '在']:    # 赞同文章 or 发表文章
-                    act_type = ActType.UPVOTE_POST \
-                        if type_string == '赞同了' else ActType.PUBLISH_POST
+                # --- ignore Round Table temporarily ---
+                if act.attrs['data-type-detail'] == "member_follow_roundtable":
+                    continue
+                # --- --- --- --- -- --- --- --- --- ---
+                yield Activity(act, self._session, self)
 
-                    column_url = act.find('a', class_='column_link')['href']
-                    column_name = act.find('a', class_='column_link').text
-                    column = Column(column_url, column_name,
-                                    session=self._session)
-                    try:
-                        author_tag = act.find('div', class_='author-info')
-                        author_url = Zhihu_URL + author_tag.a['href']
-                        author_info = list(author_tag.stripped_strings)
-                        author_name = author_info[0]
-                        author_motto = author_info[1] \
-                            if len(author_info) > 1 else ''
-                    except TypeError:
-                        author_url = None
-                        author_name = '匿名用户'
-                        author_motto = ''
-                    author = Author(author_url, author_name, author_motto,
-                                    session=self._session)
-                    post_url = act.find('a', class_='post-link')['href']
-                    post_title = act.find('a', class_='post-link').text
-                    post_comment_num, post_upvote_num = self._parse_un_cn(act)
-                    post = Post(post_url, column, author, post_title,
-                                post_upvote_num, post_comment_num,
-                                session=self._session)
+    @property
+    def last_activity_time(self):
+        """获取用户最后一次活动的时间
 
-                    yield Activity(act_type, act_time, post=post)
-                elif type_string == '关注了专栏':
-                    act_type = ActType.FOLLOW_COLUMN
-                    column = Column(act.div.a['href'], act.div.a.text,
-                                    session=self._session)
-                    yield Activity(act_type, act_time, column=column)
-                elif type_string == '关注了问题':
-                    act_type = ActType.FOLLOW_QUESTION
-                    question = Question(Zhihu_URL + act.div.a['href'],
-                                        act.div.a.text, session=self._session)
-                    yield Activity(act_type, act_time, question=question)
-                elif type_string == '提了一个问题':
-                    act_type = ActType.ASK_QUESTION
-                    question = Question(Zhihu_URL +
-                                        act.div.contents[3]['href'],
-                                        list(act.div.children)[3].text,
-                                        session=self._session)
-                    yield Activity(act_type, act_time, question=question)
-                elif type_string == '赞同了回答':
-                    act_type = ActType.UPVOTE_ANSWER
-                    question_url = Zhihu_URL + re_a2q.match(
-                        act.div.a['href']).group(1)
-                    question_title = act.div.a.text
-                    question = Question(question_url, question_title,
-                                        session=self._session)
-
-                    try_find_author = act.find('h3').find_all(
-                        'a', href=re.compile('^/people/[^/]*$'))
-                    if len(try_find_author) == 0:
-                        author_url = None
-                        author_name = '匿名用户'
-                        author_motto = ''
-                        photo_url = None
-                    else:
-                        try_find_author = try_find_author[-1]
-                        author_url = Zhihu_URL + try_find_author['href']
-                        author_name = try_find_author.text
-                        try_find_motto = try_find_author.parent.strong
-                        if try_find_motto is None:
-                            author_motto = ''
-                        else:
-                            author_motto = try_find_motto['title']
-                        photo_url = PROTOCOL + try_find_author.parent.a.img[
-                            'src'].replace('_s', '_r')
-                    author = Author(author_url, author_name, author_motto,
-                                    photo_url=photo_url, session=self._session)
-
-                    answer_url = Zhihu_URL + act.div.a['href']
-                    answer_comment_num, answer_upvote_num = \
-                        self._parse_un_cn(act)
-                    answer = Answer(answer_url, question, author,
-                                    answer_upvote_num, session=self._session)
-
-                    yield Activity(act_type, act_time, answer=answer)
-                elif type_string == '回答了问题':
-                    act_type = ActType.ANSWER_QUESTION
-                    question_url = Zhihu_URL + re_a2q.match(
-                        act.div.find_all('a')[-1]['href']).group(1)
-                    question_title = act.div.find_all('a')[-1].text
-                    question = Question(question_url, question_title,
-                                        session=self._session)
-
-                    answer_url = Zhihu_URL + \
-                        act.div.find_all('a')[-1]['href']
-                    answer_comment_num, answer_upvote_num = \
-                        self._parse_un_cn(act)
-                    answer = Answer(answer_url, question, self,
-                                    answer_upvote_num, session=self._session)
-
-                    yield Activity(act_type, act_time, answer=answer)
-                elif type_string == '关注了话题':
-                    act_type = ActType.FOLLOW_TOPIC
-                    topic_url = Zhihu_URL + act.div.a['href']
-                    topic_name = act.div.a['title']
-                    topic = Topic(topic_url, topic_name, session=self._session)
-                    yield Activity(act_type, act_time, topic=topic)
+        :return: 用户最后一次活动的时间，返回值为 unix 时间戳
+        :rtype: int
+        """
+        self._make_soup()
+        act = self.soup.find(
+            'div', class_='zm-profile-section-item zm-item clearfix')
+        return int(act['data-time']) if act is not None else -1
 
     def is_zero_user(self):
         """返回当前用户是否为三零用户，其实是四零： 赞同0，感谢0，提问0，回答0.
@@ -580,15 +686,17 @@ class Author:
         :rtype: bool
         """
         return self.upvote_num + self.thank_num + \
-            self.question_num + self.answer_num == 0
+               self.question_num + self.answer_num == 0
 
-    @staticmethod
-    def _parse_un_cn(act):
-        upvote_num = int(act.find(
-            'a', class_='zm-item-vote-count')['data-votecount'])
-        comment = act.find('a', class_='toggle-comment')
-        comment_text = next(comment.stripped_strings)
-        comment_num_match = re_get_number.match(comment_text)
-        comment_num = int(comment_num_match.group(1)) \
-            if comment_num_match is not None else 0
-        return comment_num, upvote_num
+
+class _Anonymous:
+    def __init__(self):
+        self.name = "匿名用户"
+        self.url = ''
+
+
+ANONYMOUS = _Anonymous()
+"""匿名用户常量，通过 ``zhihu.ANONYMOUS`` 访问。
+
+提问者、回答者、点赞者、问题关注者、评论者都可能是 ``ANONYMOUS``
+"""
